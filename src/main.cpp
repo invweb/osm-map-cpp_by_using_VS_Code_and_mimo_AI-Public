@@ -116,17 +116,6 @@ struct MapApp {
                         double lat = std::stod(response.substr(lat_pos + 12));
                         double lon = std::stod(response.substr(lon_pos + 13));
                         std::lock_guard<std::mutex> lock(result_mutex);
-                        LoadedTile loc;
-                        loc.x = -999999;
-                        loc.y = (int)(lat * 10000);
-                        loc.zoom = (int)(lon * 10000);
-                        loc.pixels.clear();
-                        result_mutex.lock();
-                        result_mutex.unlock();
-                        // Use a separate flag
-                        std::lock_guard<std::mutex> l2(result_mutex);
-                        // Store location in a special way - add to results with a flag
-                        // Actually let's use a separate location result queue
                         location_lat = lat;
                         location_lon = lon;
                         location_result_ready = true;
@@ -291,9 +280,17 @@ struct MapApp {
 
     void process_results() {
         std::deque<LoadedTile> batch;
+        bool got_location = false;
+        double loc_lat = 0, loc_lon = 0;
         {
             std::lock_guard<std::mutex> lock(result_mutex);
             batch.swap(results);
+            if (location_result_ready) {
+                location_result_ready = false;
+                got_location = true;
+                loc_lat = location_lat;
+                loc_lon = location_lon;
+            }
         }
         for (auto& lt : batch) {
             TileKey key{lt.x, lt.y, lt.zoom};
@@ -309,13 +306,12 @@ struct MapApp {
             tiles[key] = {tex, lt.width, lt.height};
         }
 
-        if (location_result_ready) {
-            location_result_ready = false;
-            center_lat = location_lat;
-            center_lon = location_lon;
+        if (got_location) {
+            center_lat = loc_lat;
+            center_lon = loc_lon;
             zoom = 14;
-            my_lat = location_lat;
-            my_lon = location_lon;
+            my_lat = loc_lat;
+            my_lon = loc_lon;
             has_location = true;
             clear_tiles();
         }
@@ -479,7 +475,7 @@ int main() {
     GLFWwindow* window = glfwCreateWindow(800, 600, "OpenStreetMap Viewer", nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(0);
+    glfwSwapInterval(1);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
