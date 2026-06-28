@@ -110,16 +110,18 @@ struct MapApp {
                 CURLcode res = curl_easy_perform(curl);
                 curl_easy_cleanup(curl);
                 if (res == CURLE_OK) {
-                    auto lat_pos = response.find("\"latitude\":");
-                    auto lon_pos = response.find("\"longitude\":");
-                    if (lat_pos != std::string::npos && lon_pos != std::string::npos) {
-                        double lat = std::stod(response.substr(lat_pos + 12));
-                        double lon = std::stod(response.substr(lon_pos + 13));
-                        std::lock_guard<std::mutex> lock(result_mutex);
-                        location_lat = lat;
-                        location_lon = lon;
-                        location_result_ready = true;
-                    }
+                    try {
+                        auto lat_pos = response.find("\"latitude\":");
+                        auto lon_pos = response.find("\"longitude\":");
+                        if (lat_pos != std::string::npos && lon_pos != std::string::npos) {
+                            double lat = std::stod(response.substr(lat_pos + 12));
+                            double lon = std::stod(response.substr(lon_pos + 13));
+                            std::lock_guard<std::mutex> lock(result_mutex);
+                            location_lat = lat;
+                            location_lon = lon;
+                            location_result_ready = true;
+                        }
+                    } catch (...) {}
                 }
             }
             location_loading = false;
