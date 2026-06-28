@@ -22,6 +22,23 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef __APPLE__
+#include <objc/objc.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <unistd.h>
+
+static void crash_handler(int sig) {
+    void* callstack[128];
+    int frames = backtrace(callstack, 128);
+    fprintf(stderr, "\n=== CRASH: signal %d ===\n", sig);
+    backtrace_symbols_fd(callstack, frames, 2);
+    _exit(1);
+}
+#endif
+
 static const int TILE_SIZE = 256;
 static const int LOGO_SIZE = 200;
 static const float SPLASH_DURATION = 3.0f;
@@ -411,11 +428,17 @@ struct MapApp {
         if (dragging && ImGui::IsMouseDragging(0)) {
             ImVec2 mp = io.MousePos;
             float dx = mp.x - drag_start.x;
-            double mpp = 156543.03 * cos(center_lat * M_PI / 180.0) / pow(2.0, zoom);
-            center_lon -= dx * mpp / 111320.0;
+            float dy = mp.y - drag_start.y;
             double lat_rad = center_lat * M_PI / 180.0;
-            double mppy = 156543.03 * cos(lat_rad) / pow(2.0, zoom);
-            center_lat += (drag_start.y - mp.y) * mppy / 110540.0;
+            double cos_lat = cos(lat_rad);
+            if (fabs(cos_lat) < 0.01) cos_lat = 0.01;
+            double mpp = 156543.03 * cos_lat / pow(2.0, zoom);
+            center_lon -= dx * mpp / 111320.0;
+            center_lat += dy * mpp / 110540.0;
+            if (center_lat > 85.0) center_lat = 85.0;
+            if (center_lat < -85.0) center_lat = -85.0;
+            while (center_lon > 180.0) center_lon -= 360.0;
+            while (center_lon < -180.0) center_lon += 360.0;
             drag_start = mp;
         }
 
@@ -466,6 +489,12 @@ struct MapApp {
 };
 
 int main() {
+    signal(SIGSEGV, crash_handler);
+    signal(SIGABRT, crash_handler);
+    signal(SIGBUS, crash_handler);
+    signal(SIGFPE, crash_handler);
+    signal(SIGILL, crash_handler);
+
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
     if (!glfwInit()) return 1;
@@ -478,6 +507,24 @@ int main() {
     if (!window) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    glfwSetWindowCloseCallback(window, [](GLFWwindow* w) {
+        fprintf(stderr, "[GLFW] window close requested\n");
+    });
+
+    glfwSetErrorCallback([](int error, const char* desc) {
+        fprintf(stderr, "[GLFW] error %d: %s\n", error, desc);
+    });
+
+#ifdef __APPLE__
+    {
+        Class NSApplication = objc_getClass("NSApplication");
+        SEL sel_shared = sel_registerName("sharedApplication");
+        id nsApp = ((id(*)(Class, SEL))objc_msgSend)(NSApplication, sel_shared);
+        SEL sel_activate = sel_registerName("activateIgnoringOtherApps:");
+        ((void(*)(id, SEL, BOOL))objc_msgSend)(nsApp, sel_activate, YES);
+    }
+#endif
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -496,7 +543,13 @@ int main() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        app.update();
+        try {
+            app.update();
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[ERROR] update: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[ERROR] update: unknown exception\n");
+        }
 
         ImGui::Render();
         int display_w, display_h;
