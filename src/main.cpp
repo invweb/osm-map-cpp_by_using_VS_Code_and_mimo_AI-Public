@@ -376,17 +376,30 @@ struct MapApp {
         if (scroll > 0 && zoom < 19) { zoom++; clear_tiles(); }
         else if (scroll < 0 && zoom > 1) { zoom--; clear_tiles(); }
 
-        ImGui::SetCursorScreenPos(ImVec2(bx, by - bs * 2 - sp * 2));
-        if (ImGui::Button("-", ImVec2(bs, bs)) && zoom > 1) { zoom--; clear_tiles(); }
-        ImGui::SetCursorScreenPos(ImVec2(bx, by - bs - sp));
-        if (ImGui::Button("+", ImVec2(bs, bs)) && zoom < 19) { zoom++; clear_tiles(); }
-        ImGui::SetCursorScreenPos(ImVec2(bx, by));
-        if (location_loading) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
-            ImGui::Button("...", ImVec2(bs, bs));
-            ImGui::PopStyleColor();
-        } else if (ImGui::Button("\xE2\x8C\x97", ImVec2(bs, bs))) {
-            start_location_request();
+        auto* fg = ImGui::GetForegroundDrawList();
+
+        auto draw_btn = [&](float x, float y, const char* label, bool active) {
+            ImVec2 mn(x, y), mx(x + bs, y + bs);
+            ImU32 bg = active ? IM_COL32(60, 60, 60, 220) : IM_COL32(40, 40, 40, 200);
+            ImU32 border = IM_COL32(100, 100, 100, 255);
+            fg->AddRectFilled(mn, mx, bg, 4.0f);
+            fg->AddRect(mn, mx, border, 4.0f);
+            auto ts = ImGui::CalcTextSize(label);
+            fg->AddText(ImVec2(x + bs / 2 - ts.x / 2, y + bs / 2 - ts.y / 2), IM_COL32(255, 255, 255, 255), label);
+        };
+
+        bool minus_hovered = io.MousePos.x > bx && io.MousePos.x < bx + bs && io.MousePos.y > by - bs * 2 - sp * 2 && io.MousePos.y < by - bs * 2 - sp * 2 + bs;
+        bool plus_hovered = io.MousePos.x > bx && io.MousePos.x < bx + bs && io.MousePos.y > by - bs - sp && io.MousePos.y < by - bs - sp + bs;
+        bool loc_hovered = io.MousePos.x > bx && io.MousePos.x < bx + bs && io.MousePos.y > by && io.MousePos.y < by + bs;
+
+        draw_btn(bx, by - bs * 2 - sp * 2, "-", minus_hovered);
+        draw_btn(bx, by - bs - sp, "+", plus_hovered);
+        draw_btn(bx, by, "\xE2\x8C\x97", loc_hovered);
+
+        if (io.MouseClicked[0]) {
+            if (minus_hovered && zoom > 1) { zoom--; clear_tiles(); }
+            if (plus_hovered && zoom < 19) { zoom++; clear_tiles(); }
+            if (loc_hovered && !location_loading) start_location_request();
         }
 
         char ct[256];
