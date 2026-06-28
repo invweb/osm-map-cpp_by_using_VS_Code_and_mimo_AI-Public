@@ -14,7 +14,6 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
-#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -26,17 +25,6 @@
 #include <objc/objc.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
-#include <signal.h>
-#include <execinfo.h>
-#include <unistd.h>
-
-static void crash_handler(int sig) {
-    void* callstack[128];
-    int frames = backtrace(callstack, 128);
-    fprintf(stderr, "\n=== CRASH: signal %d ===\n", sig);
-    backtrace_symbols_fd(callstack, frames, 2);
-    _exit(1);
-}
 #endif
 
 static const int TILE_SIZE = 256;
@@ -46,9 +34,7 @@ static const int DEFAULT_ZOOM = 14;
 static const double FALLBACK_LAT = 55.7558;
 static const double FALLBACK_LON = 37.6173;
 
-struct TileRequest {
-    int x, y, zoom;
-};
+struct TileRequest { int x, y, zoom; };
 
 struct LoadedTile {
     int x, y, zoom;
@@ -70,10 +56,7 @@ struct TileKeyHash {
     }
 };
 
-struct TileTexture {
-    GLuint tex;
-    int width, height;
-};
+struct TileTexture { GLuint tex; int width, height; };
 
 struct MapApp {
     int zoom = DEFAULT_ZOOM;
@@ -103,9 +86,10 @@ struct MapApp {
     bool has_location = false;
     double my_lat = 0, my_lon = 0;
     bool location_loading = false;
-
     std::thread location_thread;
-    bool location_request_pending = false;
+
+    double location_lat = 0, location_lon = 0;
+    bool location_result_ready = false;
 
     void start_location_request() {
         if (location_loading) return;
@@ -118,9 +102,8 @@ struct MapApp {
                 curl_easy_setopt(curl, CURLOPT_URL, "https://ipapi.co/json/");
                 curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
                 curl_easy_setopt(curl, CURLOPT_USERAGENT, "OsmMapViewer/1.0 (cpp)");
-                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-                    auto* str = static_cast<std::string*>(userdata);
-                    str->append(ptr, size * nmemb);
+                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* ptr, size_t size, size_t nmemb, void* ud) -> size_t {
+                    static_cast<std::string*>(ud)->append(ptr, size * nmemb);
                     return size * nmemb;
                 });
                 curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
@@ -128,11 +111,11 @@ struct MapApp {
                 curl_easy_cleanup(curl);
                 if (res == CURLE_OK) {
                     try {
-                        auto lat_pos = response.find("\"latitude\":");
-                        auto lon_pos = response.find("\"longitude\":");
-                        if (lat_pos != std::string::npos && lon_pos != std::string::npos) {
-                            double lat = std::stod(response.substr(lat_pos + 12));
-                            double lon = std::stod(response.substr(lon_pos + 13));
+                        auto lp = response.find("\"latitude\":");
+                        auto lop = response.find("\"longitude\":");
+                        if (lp != std::string::npos && lop != std::string::npos) {
+                            double lat = std::stod(response.substr(lp + 12));
+                            double lon = std::stod(response.substr(lop + 13));
                             std::lock_guard<std::mutex> lock(result_mutex);
                             location_lat = lat;
                             location_lon = lon;
@@ -145,9 +128,6 @@ struct MapApp {
         });
     }
 
-    double location_lat = 0, location_lon = 0;
-    bool location_result_ready = false;
-
     void worker_thread() {
         CURL* curl = curl_easy_init();
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "OsmMapViewer/1.0 (cpp)");
@@ -155,7 +135,7 @@ struct MapApp {
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
         while (worker_running) {
-            TileRequest req;
+            TileRequest req{};
             bool have_req = false;
             {
                 std::lock_guard<std::mutex> lock(queue_mutex);
@@ -175,9 +155,8 @@ struct MapApp {
 
             std::string body;
             curl_easy_setopt(curl, CURLOPT_URL, url);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-                auto* str = static_cast<std::string*>(userdata);
-                str->append(ptr, size * nmemb);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* ptr, size_t size, size_t nmemb, void* ud) -> size_t {
+                static_cast<std::string*>(ud)->append(ptr, size * nmemb);
                 return size * nmemb;
             });
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
@@ -188,12 +167,9 @@ struct MapApp {
                 unsigned char* data = stbi_load_from_memory((const unsigned char*)body.data(), (int)body.size(), &w, &h, &ch, 4);
                 if (data && w == TILE_SIZE && h == TILE_SIZE) {
                     LoadedTile lt;
-                    lt.x = req.x;
-                    lt.y = req.y;
-                    lt.zoom = req.zoom;
+                    lt.x = req.x; lt.y = req.y; lt.zoom = req.zoom;
                     lt.pixels.assign(data, data + w * h * 4);
-                    lt.width = w;
-                    lt.height = h;
+                    lt.width = w; lt.height = h;
                     std::lock_guard<std::mutex> lock(result_mutex);
                     results.push_back(std::move(lt));
                 }
@@ -203,25 +179,23 @@ struct MapApp {
         curl_easy_cleanup(curl);
     }
 
-    static void tile_coords(double lat, double lon, int zoom, int& out_x, int& out_y) {
+    static void tile_coords(double lat, double lon, int zoom, int& ox, int& oy) {
         double n = pow(2.0, zoom);
-        out_x = (int)floor((lon + 180.0) / 360.0 * n);
+        ox = (int)floor((lon + 180.0) / 360.0 * n);
         double lat_rad = lat * M_PI / 180.0;
-        out_y = (int)floor((1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / M_PI) / 2.0 * n);
+        oy = (int)floor((1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / M_PI) / 2.0 * n);
     }
 
-    void request_tile(int x, int y, int zoom) {
-        TileKey key{x, y, zoom};
+    void request_tile(int x, int y, int z) {
+        TileKey key{x, y, z};
         if (tiles.count(key) || loading.count(key)) return;
         loading.insert(key);
         std::lock_guard<std::mutex> lock(queue_mutex);
-        queue.push_back({x, y, zoom});
+        queue.push_back({x, y, z});
     }
 
     void clear_tiles() {
-        for (auto& [key, tex] : tiles) {
-            glDeleteTextures(1, &tex.tex);
-        }
+        for (auto& [key, tex] : tiles) glDeleteTextures(1, &tex.tex);
         tiles.clear();
         loading.clear();
         std::lock_guard<std::mutex> lock(queue_mutex);
@@ -239,24 +213,16 @@ struct MapApp {
                 if (dist < 0.85f) {
                     float grid = (sinf(cx * 12.0f) * cosf(cy * 12.0f) + 1.0f) * 0.5f;
                     float detail = 1.0f - dist * 0.5f;
-                    unsigned char r = (unsigned char)(20 * detail + grid * 15);
-                    unsigned char g = (unsigned char)(80 * detail + grid * 40);
-                    unsigned char b = (unsigned char)(120 * detail + grid * 30);
-                    pixels[idx + 0] = r;
-                    pixels[idx + 1] = g;
-                    pixels[idx + 2] = b;
-                    pixels[idx + 3] = 255;
+                    pixels[idx] = (unsigned char)(20 * detail + grid * 15);
+                    pixels[idx+1] = (unsigned char)(80 * detail + grid * 40);
+                    pixels[idx+2] = (unsigned char)(120 * detail + grid * 30);
+                    pixels[idx+3] = 255;
                 } else if (dist < 0.9f) {
                     float alpha = (0.9f - dist) / 0.05f * 255.0f;
-                    pixels[idx + 0] = 40;
-                    pixels[idx + 1] = 100;
-                    pixels[idx + 2] = 140;
-                    pixels[idx + 3] = (unsigned char)alpha;
+                    pixels[idx] = 40; pixels[idx+1] = 100; pixels[idx+2] = 140;
+                    pixels[idx+3] = (unsigned char)alpha;
                 } else {
-                    pixels[idx + 0] = 0;
-                    pixels[idx + 1] = 0;
-                    pixels[idx + 2] = 0;
-                    pixels[idx + 3] = 0;
+                    pixels[idx] = pixels[idx+1] = pixels[idx+2] = pixels[idx+3] = 0;
                 }
             }
         }
@@ -269,25 +235,22 @@ struct MapApp {
         return tex;
     }
 
-    void draw_marker(ImDrawList* draw_list, ImVec2 center, float tile_size) {
-        int mx, my;
+    void draw_marker(ImDrawList* dl, ImVec2 center, float ts) {
+        int mx, my, ctx_x, cty_y;
         tile_coords(my_lat, my_lon, zoom, mx, my);
-        int ctx_x, cty_y;
         tile_coords(center_lat, center_lon, zoom, ctx_x, cty_y);
-
-        float sx = center.x + (mx - ctx_x) * tile_size;
-        float sy = center.y + (my - cty_y) * tile_size;
-
-        draw_list->AddCircleFilled(ImVec2(sx + 1, sy + 2), 12, IM_COL32(0, 0, 0, 60));
+        float sx = center.x + (mx - ctx_x) * ts;
+        float sy = center.y + (my - cty_y) * ts;
+        dl->AddCircleFilled(ImVec2(sx + 1, sy + 2), 12, IM_COL32(0, 0, 0, 60));
         const int N = 20;
         ImVec2 pts[N];
         for (int i = 0; i < N; i++) {
-            float angle = 2.0f * M_PI * i / N;
-            pts[i] = ImVec2(sx + cosf(angle) * 10, sy - 2 + sinf(angle) * 10);
+            float a = 2.0f * M_PI * i / N;
+            pts[i] = ImVec2(sx + cosf(a) * 10, sy - 2 + sinf(a) * 10);
         }
-        draw_list->AddConvexPolyFilled(pts, N, IM_COL32(220, 50, 50, 255));
-        draw_list->AddCircleFilled(ImVec2(sx, sy - 2), 5, IM_COL32(255, 255, 255, 255));
-        draw_list->AddText(ImVec2(sx - 30, sy + 14), IM_COL32(255, 255, 255, 255), "You are here");
+        dl->AddConvexPolyFilled(pts, N, IM_COL32(220, 50, 50, 255));
+        dl->AddCircleFilled(ImVec2(sx, sy - 2), 5, IM_COL32(255, 255, 255, 255));
+        dl->AddText(ImVec2(sx - 30, sy + 14), IM_COL32(255, 255, 255, 255), "You are here");
     }
 
     void init() {
@@ -324,13 +287,9 @@ struct MapApp {
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, lt.width, lt.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, lt.pixels.data());
             tiles[key] = {tex, lt.width, lt.height};
         }
-
         if (got_location) {
-            center_lat = loc_lat;
-            center_lon = loc_lon;
-            zoom = 14;
-            my_lat = loc_lat;
-            my_lon = loc_lon;
+            center_lat = loc_lat; center_lon = loc_lon; zoom = 14;
+            my_lat = loc_lat; my_lon = loc_lon;
             has_location = true;
             clear_tiles();
         }
@@ -338,101 +297,72 @@ struct MapApp {
 
     void update() {
         process_results();
-
         ImGuiIO& io = ImGui::GetIO();
-        ImVec2 display_size = io.DisplaySize;
+        ImVec2 ds = io.DisplaySize;
 
         if (!splash_done) {
             float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
             if (elapsed >= SPLASH_DURATION) {
                 splash_done = true;
             } else {
-                ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
-                draw_list->AddRectFilled(ImVec2(0, 0), display_size, IM_COL32(20, 25, 40, 255));
-
-                ImVec2 logo_pos(display_size.x / 2 - 60, display_size.y / 2 - 120);
-                draw_list->AddImage((ImTextureID)(intptr_t)logo_tex, logo_pos, ImVec2(logo_pos.x + 120, logo_pos.y + 120));
-
-                const char* title = "OpenStreetMap Viewer";
-                ImVec2 title_size = ImGui::CalcTextSize(title);
-                draw_list->AddText(ImVec2(display_size.x / 2 - title_size.x / 2, display_size.y / 2 + 20), IM_COL32(255, 255, 255, 255), title);
-
-                const char* subtitle = "powered by OpenStreetMap";
-                ImVec2 sub_size = ImGui::CalcTextSize(subtitle);
-                draw_list->AddText(ImVec2(display_size.x / 2 - sub_size.x / 2, display_size.y / 2 + 55), IM_COL32(150, 150, 150, 255), subtitle);
-
+                auto* dl = ImGui::GetBackgroundDrawList();
+                dl->AddRectFilled(ImVec2(0, 0), ds, IM_COL32(20, 25, 40, 255));
+                ImVec2 lp(ds.x / 2 - 60, ds.y / 2 - 120);
+                dl->AddImage((ImTextureID)(intptr_t)logo_tex, lp, ImVec2(lp.x + 120, lp.y + 120));
+                auto t = ImGui::CalcTextSize("OpenStreetMap Viewer");
+                dl->AddText(ImVec2(ds.x / 2 - t.x / 2, ds.y / 2 + 20), IM_COL32(255, 255, 255, 255), "OpenStreetMap Viewer");
+                auto s = ImGui::CalcTextSize("powered by OpenStreetMap");
+                dl->AddText(ImVec2(ds.x / 2 - s.x / 2, ds.y / 2 + 55), IM_COL32(150, 150, 150, 255), "powered by OpenStreetMap");
                 return;
             }
         }
 
-        int center_tx, center_ty;
-        tile_coords(center_lat, center_lon, zoom, center_tx, center_ty);
+        int ctx, cty;
+        tile_coords(center_lat, center_lon, zoom, ctx, cty);
+        int tx_count = (int)ceil(ds.x / 2.0f / TILE_SIZE) + 1;
+        int ty_count = (int)ceil(ds.y / 2.0f / TILE_SIZE) + 1;
+        ImVec2 cs(ds.x / 2, ds.y / 2);
 
-        int tiles_x = (int)ceil(display_size.x / 2.0f / TILE_SIZE) + 1;
-        int tiles_y = (int)ceil(display_size.y / 2.0f / TILE_SIZE) + 1;
+        for (int dy = -ty_count; dy <= ty_count; dy++)
+            for (int dx = -tx_count; dx <= tx_count; dx++)
+                request_tile(ctx + dx, cty + dy, zoom);
 
-        ImVec2 center_screen(display_size.x / 2, display_size.y / 2);
-
-        for (int dy = -tiles_y; dy <= tiles_y; dy++) {
-            for (int dx = -tiles_x; dx <= tiles_x; dx++) {
-                int tx = center_tx + dx;
-                int ty = center_ty + dy;
-                request_tile(tx, ty, zoom);
-            }
-        }
-
-        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
-
-        for (int dy = -tiles_y; dy <= tiles_y; dy++) {
-            for (int dx = -tiles_x; dx <= tiles_x; dx++) {
-                int tx = center_tx + dx;
-                int ty = center_ty + dy;
-                float sx = center_screen.x + dx * TILE_SIZE;
-                float sy = center_screen.y + dy * TILE_SIZE;
-                ImVec2 p_min(sx, sy);
-                ImVec2 p_max(sx + TILE_SIZE, sy + TILE_SIZE);
-
-                TileKey key{tx, ty, zoom};
+        auto* dl = ImGui::GetBackgroundDrawList();
+        for (int dy = -ty_count; dy <= ty_count; dy++) {
+            for (int dx = -tx_count; dx <= tx_count; dx++) {
+                float sx = cs.x + dx * TILE_SIZE;
+                float sy = cs.y + dy * TILE_SIZE;
+                ImVec2 mn(sx, sy), mx(sx + TILE_SIZE, sy + TILE_SIZE);
+                TileKey key{ctx + dx, cty + dy, zoom};
                 auto it = tiles.find(key);
-                if (it != tiles.end()) {
-                    draw_list->AddImage((ImTextureID)(intptr_t)it->second.tex, p_min, p_max);
-                } else {
-                    draw_list->AddRectFilled(p_min, p_max, IM_COL32(230, 230, 230, 255));
-                }
+                if (it != tiles.end())
+                    dl->AddImage((ImTextureID)(intptr_t)it->second.tex, mn, mx);
+                else
+                    dl->AddRectFilled(mn, mx, IM_COL32(230, 230, 230, 255));
             }
         }
 
-        if (has_location) {
-            draw_marker(draw_list, center_screen, (float)TILE_SIZE);
-        }
+        if (has_location) draw_marker(dl, cs, (float)TILE_SIZE);
 
-        float btn_size = 36;
-        float margin = 10;
-        float spacing = 8;
-        float bx = display_size.x - margin - btn_size;
-        float by = display_size.y - margin - btn_size;
+        float bs = 36, mg = 10, sp = 8;
+        float bx = ds.x - mg - bs, by = ds.y - mg - bs;
 
         if (ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered()) {
             ImVec2 mp = io.MousePos;
-            if (mp.x > 0 && mp.x < display_size.x && mp.y > 0 && mp.y < display_size.y) {
-                bool on_button = (mp.x > bx - margin && mp.y > by - btn_size * 3 - spacing * 2 - margin);
-                if (!on_button) {
+            if (mp.x > 0 && mp.x < ds.x && mp.y > 0 && mp.y < ds.y) {
+                if (!(mp.x > bx - mg && mp.y > by - bs * 3 - sp * 2 - mg)) {
                     dragging = true;
                     drag_start = mp;
                 }
             }
         }
-        if (ImGui::IsMouseReleased(0)) {
-            dragging = false;
-        }
+        if (ImGui::IsMouseReleased(0)) dragging = false;
         if (dragging && ImGui::IsMouseDragging(0)) {
             ImVec2 mp = io.MousePos;
-            float dx = mp.x - drag_start.x;
-            float dy = mp.y - drag_start.y;
-            double lat_rad = center_lat * M_PI / 180.0;
-            double cos_lat = cos(lat_rad);
-            if (fabs(cos_lat) < 0.01) cos_lat = 0.01;
-            double mpp = 156543.03 * cos_lat / pow(2.0, zoom);
+            float dx = mp.x - drag_start.x, dy = mp.y - drag_start.y;
+            double cl = cos(center_lat * M_PI / 180.0);
+            if (fabs(cl) < 0.01) cl = 0.01;
+            double mpp = 156543.03 * cl / pow(2.0, zoom);
             center_lon -= dx * mpp / 111320.0;
             center_lat += dy * mpp / 110540.0;
             if (center_lat > 85.0) center_lat = 85.0;
@@ -443,58 +373,37 @@ struct MapApp {
         }
 
         float scroll = io.MouseWheel;
-        if (scroll > 0 && zoom < 19) {
-            zoom++;
-            clear_tiles();
-        } else if (scroll < 0 && zoom > 1) {
-            zoom--;
-            clear_tiles();
-        }
+        if (scroll > 0 && zoom < 19) { zoom++; clear_tiles(); }
+        else if (scroll < 0 && zoom > 1) { zoom--; clear_tiles(); }
 
-        ImGui::SetCursorScreenPos(ImVec2(bx, by - btn_size * 2 - spacing * 2));
-        if (ImGui::Button("-", ImVec2(btn_size, btn_size)) && zoom > 1) {
-            zoom--;
-            clear_tiles();
-        }
-        ImGui::SetCursorScreenPos(ImVec2(bx, by - btn_size - spacing));
-        if (ImGui::Button("+", ImVec2(btn_size, btn_size)) && zoom < 19) {
-            zoom++;
-            clear_tiles();
-        }
+        ImGui::SetCursorScreenPos(ImVec2(bx, by - bs * 2 - sp * 2));
+        if (ImGui::Button("-", ImVec2(bs, bs)) && zoom > 1) { zoom--; clear_tiles(); }
+        ImGui::SetCursorScreenPos(ImVec2(bx, by - bs - sp));
+        if (ImGui::Button("+", ImVec2(bs, bs)) && zoom < 19) { zoom++; clear_tiles(); }
         ImGui::SetCursorScreenPos(ImVec2(bx, by));
         if (location_loading) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
-            ImGui::Button("...", ImVec2(btn_size, btn_size));
+            ImGui::Button("...", ImVec2(bs, bs));
             ImGui::PopStyleColor();
-        } else {
-            if (ImGui::Button("\xE2\x8C\x97", ImVec2(btn_size, btn_size))) {
-                start_location_request();
-            }
+        } else if (ImGui::Button("\xE2\x8C\x97", ImVec2(bs, bs))) {
+            start_location_request();
         }
 
-        char coord_text[256];
-        snprintf(coord_text, sizeof(coord_text), "Zoom: %d | Lat: %.4f | Lon: %.4f", zoom, center_lat, center_lon);
-        draw_list->AddText(ImVec2(margin, display_size.y - margin - 20), IM_COL32(255, 255, 255, 255), coord_text);
+        char ct[256];
+        snprintf(ct, sizeof(ct), "Zoom: %d | Lat: %.4f | Lon: %.4f", zoom, center_lat, center_lon);
+        dl->AddText(ImVec2(mg, ds.y - mg - 20), IM_COL32(255, 255, 255, 255), ct);
     }
 
     void shutdown() {
         worker_running = false;
         if (worker.joinable()) worker.join();
         if (location_thread.joinable()) location_thread.join();
-        for (auto& [key, tex] : tiles) {
-            glDeleteTextures(1, &tex.tex);
-        }
+        for (auto& [key, tex] : tiles) glDeleteTextures(1, &tex.tex);
         if (logo_tex) glDeleteTextures(1, &logo_tex);
     }
 };
 
 int main() {
-    signal(SIGSEGV, crash_handler);
-    signal(SIGABRT, crash_handler);
-    signal(SIGBUS, crash_handler);
-    signal(SIGFPE, crash_handler);
-    signal(SIGILL, crash_handler);
-
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
     if (!glfwInit()) return 1;
@@ -508,28 +417,17 @@ int main() {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    glfwSetWindowCloseCallback(window, [](GLFWwindow* w) {
-        fprintf(stderr, "[GLFW] window close requested\n");
-    });
-
-    glfwSetErrorCallback([](int error, const char* desc) {
-        fprintf(stderr, "[GLFW] error %d: %s\n", error, desc);
-    });
-
 #ifdef __APPLE__
     {
-        Class NSApplication = objc_getClass("NSApplication");
-        SEL sel_shared = sel_registerName("sharedApplication");
-        id nsApp = ((id(*)(Class, SEL))objc_msgSend)(NSApplication, sel_shared);
-        SEL sel_activate = sel_registerName("activateIgnoringOtherApps:");
-        ((void(*)(id, SEL, BOOL))objc_msgSend)(nsApp, sel_activate, YES);
+        Class cls = objc_getClass("NSApplication");
+        id nsApp = ((id(*)(Class, SEL))objc_msgSend)(cls, sel_registerName("sharedApplication"));
+        ((void(*)(id, SEL, BOOL))objc_msgSend)(nsApp, sel_registerName("activateIgnoringOtherApps:"), YES);
     }
 #endif
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 150");
@@ -542,19 +440,11 @@ int main() {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-
-        try {
-            app.update();
-        } catch (const std::exception& e) {
-            fprintf(stderr, "[ERROR] update: %s\n", e.what());
-        } catch (...) {
-            fprintf(stderr, "[ERROR] update: unknown exception\n");
-        }
-
+        app.update();
         ImGui::Render();
-        int display_w, display_h;
-        glfwGetFramebufferSize(window, &display_w, &display_h);
-        glViewport(0, 0, display_w, display_h);
+        int w, h;
+        glfwGetFramebufferSize(window, &w, &h);
+        glViewport(0, 0, w, h);
         glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
