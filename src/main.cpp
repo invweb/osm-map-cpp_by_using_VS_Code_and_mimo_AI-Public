@@ -238,13 +238,13 @@ struct MapApp {
     }
 
     void screen_to_latlon(ImVec2 screen, ImVec2 center, int center_tx, int center_ty, double& lat, double& lon) {
-        float dx = screen.x - center.x;
-        float dy = screen.y - center.y;
-        double cl = cos(center_lat * M_PI / 180.0);
-        if (fabs(cl) < 0.01) cl = 0.01;
-        double mpp = 156543.03 * cl / pow(2.0, zoom);
-        lon = center_lon + dx * mpp / 111320.0;
-        lat = center_lat - dy * mpp / 110540.0;
+        float px = screen.x - center.x;
+        float py = screen.y - center.y;
+        double n = pow(2.0, zoom);
+        double tile_x = center_tx + px / TILE_SIZE;
+        double tile_y = center_ty + py / TILE_SIZE;
+        lon = tile_x / n * 360.0 - 180.0;
+        lat = atan(sinh(M_PI * (1.0 - 2.0 * tile_y / n))) * 180.0 / M_PI;
         if (lat > 85.0) lat = 85.0;
         if (lat < -85.0) lat = -85.0;
         while (lon > 180.0) lon -= 360.0;
