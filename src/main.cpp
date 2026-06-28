@@ -246,11 +246,19 @@ struct MapApp {
         return tex;
     }
 
+    ImVec2 latlon_to_screen(double lat, double lon, ImVec2 center, int ctx, int cty, float ts) {
+        double n = pow(2.0, zoom);
+        double ftx = (lon + 180.0) / 360.0 * n;
+        double lat_rad = lat * M_PI / 180.0;
+        double fty = (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / M_PI) / 2.0 * n;
+        return ImVec2(center.x + (ftx - ctx) * ts, center.y + (fty - cty) * ts);
+    }
+
     void draw_marker(ImDrawList* dl, ImVec2 center, float ts) {
-        int mx, my, ctx_x, cty_y;
-        tile_coords(my_lat, my_lon, zoom, mx, my);
+        int ctx_x, cty_y;
         tile_coords(center_lat, center_lon, zoom, ctx_x, cty_y);
-        float sx = center.x + (mx - ctx_x) * ts, sy = center.y + (my - cty_y) * ts;
+        ImVec2 pos = latlon_to_screen(my_lat, my_lon, center, ctx_x, cty_y, ts);
+        float sx = pos.x, sy = pos.y;
         dl->AddCircleFilled(ImVec2(sx + 1, sy + 2), 12, IM_COL32(0, 0, 0, 60));
         ImVec2 pts[20];
         for (int i = 0; i < 20; i++) { float a = 2.0f * M_PI * i / 20; pts[i] = ImVec2(sx + cosf(a)*10, sy - 2 + sinf(a)*10); }
@@ -263,8 +271,8 @@ struct MapApp {
         int ctx_x, cty_y;
         tile_coords(center_lat, center_lon, zoom, ctx_x, cty_y);
         for (auto& fl : flags) {
-            int fx, fy; tile_coords(fl.lat, fl.lon, zoom, fx, fy);
-            float sx = center.x + (fx - ctx_x) * ts, sy = center.y + (fy - cty_y) * ts;
+            ImVec2 pos = latlon_to_screen(fl.lat, fl.lon, center, ctx_x, cty_y, ts);
+            float sx = pos.x, sy = pos.y;
             if (sx < -50 || sx > 2000 || sy < -50 || sy > 2000) continue;
             ImVec4 c = FLAG_COLORS[fl.color_index % FLAG_COLOR_COUNT];
             ImU32 col = IM_COL32((int)(c.x*255), (int)(c.y*255), (int)(c.z*255), 255);
@@ -343,9 +351,6 @@ struct MapApp {
         int ctx, cty;
         tile_coords(center_lat, center_lon, zoom, ctx, cty);
         double n = pow(2.0, zoom);
-        double exact_tx = (center_lon + 180.0) / 360.0 * n;
-        double lat_rad = center_lat * M_PI / 180.0;
-        double exact_ty = (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / M_PI) / 2.0 * n;
         int tx_count = (int)ceil(ds.x / 2.0f / TILE_SIZE) + 1;
         int ty_count = (int)ceil(ds.y / 2.0f / TILE_SIZE) + 1;
         ImVec2 cs(ds.x / 2, ds.y / 2);
@@ -398,10 +403,10 @@ struct MapApp {
                     float held = (float)(glfwGetTime() - long_press_time);
                     if (held >= LONG_PRESS_DURATION) {
                         long_press_fired = true; long_press_active = false;
-                        double ftx = exact_tx + (long_press_start.x - cs.x) / TILE_SIZE;
-                        double fty = exact_ty + (long_press_start.y - cs.y) / TILE_SIZE;
-                        double lat = atan(sinh(M_PI * (1.0 - 2.0 * fty / n))) * 180.0 / M_PI;
+                        double ftx = ctx + (long_press_start.x - cs.x) / TILE_SIZE;
+                        double fty = cty + (long_press_start.y - cs.y) / TILE_SIZE;
                         double lon = ftx / n * 360.0 - 180.0;
+                        double lat = atan(sinh(M_PI * (1.0 - 2.0 * fty / n))) * 180.0 / M_PI;
                         if (lat > 85.0) lat = 85.0; if (lat < -85.0) lat = -85.0;
                         while (lon > 180.0) lon -= 360.0; while (lon < -180.0) lon += 360.0;
                         flags.push_back({lat, lon, next_color});
@@ -417,10 +422,9 @@ struct MapApp {
         if (dragging && ImGui::IsMouseDragging(0)) {
             ImVec2 mp = io.MousePos;
             float dx = mp.x - drag_start.x, dy = mp.y - drag_start.y;
-            double ftx = exact_tx + (drag_start.x - cs.x) / TILE_SIZE;
-            double fty = exact_ty + (drag_start.y - cs.y) / TILE_SIZE;
             double mpp_x = 360.0 / n / TILE_SIZE;
             center_lon -= dx * mpp_x;
+            double fty = cty + (drag_start.y - cs.y) / TILE_SIZE;
             double new_ty = fty - dy / TILE_SIZE;
             center_lat = atan(sinh(M_PI * (1.0 - 2.0 * new_ty / n))) * 180.0 / M_PI;
             if (center_lat > 85.0) center_lat = 85.0;
