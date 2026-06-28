@@ -342,6 +342,10 @@ struct MapApp {
 
         int ctx, cty;
         tile_coords(center_lat, center_lon, zoom, ctx, cty);
+        double n = pow(2.0, zoom);
+        double exact_tx = (center_lon + 180.0) / 360.0 * n;
+        double lat_rad = center_lat * M_PI / 180.0;
+        double exact_ty = (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / M_PI) / 2.0 * n;
         int tx_count = (int)ceil(ds.x / 2.0f / TILE_SIZE) + 1;
         int ty_count = (int)ceil(ds.y / 2.0f / TILE_SIZE) + 1;
         ImVec2 cs(ds.x / 2, ds.y / 2);
@@ -394,9 +398,8 @@ struct MapApp {
                     float held = (float)(glfwGetTime() - long_press_time);
                     if (held >= LONG_PRESS_DURATION) {
                         long_press_fired = true; long_press_active = false;
-                        double n = pow(2.0, zoom);
-                        double ftx = ctx + (long_press_start.x - cs.x) / TILE_SIZE;
-                        double fty = cty + (long_press_start.y - cs.y) / TILE_SIZE;
+                        double ftx = exact_tx + (long_press_start.x - cs.x) / TILE_SIZE;
+                        double fty = exact_ty + (long_press_start.y - cs.y) / TILE_SIZE;
                         double lat = atan(sinh(M_PI * (1.0 - 2.0 * fty / n))) * 180.0 / M_PI;
                         double lon = ftx / n * 360.0 - 180.0;
                         if (lat > 85.0) lat = 85.0; if (lat < -85.0) lat = -85.0;
@@ -414,12 +417,9 @@ struct MapApp {
         if (dragging && ImGui::IsMouseDragging(0)) {
             ImVec2 mp = io.MousePos;
             float dx = mp.x - drag_start.x, dy = mp.y - drag_start.y;
-            double n = pow(2.0, zoom);
-            double ftx = ctx + (drag_start.x - cs.x) / TILE_SIZE;
-            double fty = cty + (drag_start.y - cs.y) / TILE_SIZE;
+            double ftx = exact_tx + (drag_start.x - cs.x) / TILE_SIZE;
+            double fty = exact_ty + (drag_start.y - cs.y) / TILE_SIZE;
             double mpp_x = 360.0 / n / TILE_SIZE;
-            double lat_rad = center_lat * M_PI / 180.0;
-            double mpp_y = (180.0 / M_PI * log(tan(M_PI/4 + lat_rad/2))) / n;
             center_lon -= dx * mpp_x;
             double new_ty = fty - dy / TILE_SIZE;
             center_lat = atan(sinh(M_PI * (1.0 - 2.0 * new_ty / n))) * 180.0 / M_PI;
