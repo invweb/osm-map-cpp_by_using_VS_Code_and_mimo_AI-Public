@@ -394,7 +394,22 @@ struct MapApp {
 
         draw_btn(bx, by - bs * 2 - sp * 2, "-", minus_hovered);
         draw_btn(bx, by - bs - sp, "+", plus_hovered);
-        draw_btn(bx, by, "\xE2\x8C\x97", loc_hovered);
+
+        {
+            float lx = bx, ly = by;
+            ImVec2 mn(lx, ly), mx(lx + bs, ly + bs);
+            ImU32 bg = loc_hovered ? IM_COL32(60, 60, 60, 220) : IM_COL32(40, 40, 40, 200);
+            fg->AddRectFilled(mn, mx, bg, 4.0f);
+            fg->AddRect(mn, mx, IM_COL32(100, 100, 100, 255), 4.0f);
+            float cx = lx + bs / 2, cy = ly + bs / 2;
+            ImU32 ic = IM_COL32(220, 50, 50, 255);
+            fg->AddCircle(ImVec2(cx, cy), 8, ic, 0, 2.0f);
+            fg->AddCircleFilled(ImVec2(cx, cy), 2.5f, ic);
+            fg->AddLine(ImVec2(cx, cy - 12), ImVec2(cx, cy - 5), ic, 2.0f);
+            fg->AddLine(ImVec2(cx, cy + 5), ImVec2(cx, cy + 12), ic, 2.0f);
+            fg->AddLine(ImVec2(cx - 12, cy), ImVec2(cx - 5, cy), ic, 2.0f);
+            fg->AddLine(ImVec2(cx + 5, cy), ImVec2(cx + 12, cy), ic, 2.0f);
+        }
 
         if (io.MouseClicked[0]) {
             if (minus_hovered && zoom > 1) { zoom--; clear_tiles(); }
