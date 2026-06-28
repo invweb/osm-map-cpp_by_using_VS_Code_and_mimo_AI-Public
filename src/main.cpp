@@ -20,11 +20,13 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <fstream>
 
 #ifdef __APPLE__
 #include <objc/objc.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
+#include <sys/stat.h>
 #endif
 
 static const int TILE_SIZE = 256;
@@ -33,6 +35,20 @@ static const float SPLASH_DURATION = 3.0f;
 static const int DEFAULT_ZOOM = 14;
 static const double FALLBACK_LAT = 55.7558;
 static const double FALLBACK_LON = 37.6173;
+static const float LONG_PRESS_DURATION = 0.6f;
+static const float LONG_PRESS_RADIUS = 8.0f;
+
+static const ImVec4 FLAG_COLORS[] = {
+    {0.9f, 0.2f, 0.2f, 1.0f},
+    {0.2f, 0.7f, 0.2f, 1.0f},
+    {0.2f, 0.4f, 0.9f, 1.0f},
+    {0.9f, 0.7f, 0.1f, 1.0f},
+    {0.8f, 0.3f, 0.8f, 1.0f},
+    {0.1f, 0.8f, 0.8f, 1.0f},
+    {0.9f, 0.5f, 0.1f, 1.0f},
+    {0.5f, 0.2f, 0.9f, 1.0f},
+};
+static const int FLAG_COLOR_COUNT = sizeof(FLAG_COLORS) / sizeof(FLAG_COLORS[0]);
 
 struct TileRequest { int x, y, zoom; };
 
@@ -57,6 +73,11 @@ struct TileKeyHash {
 };
 
 struct TileTexture { GLuint tex; int width, height; };
+
+struct Flag {
+    double lat, lon;
+    int color_index;
+};
 
 struct MapApp {
     int zoom = DEFAULT_ZOOM;
@@ -90,6 +111,36 @@ struct MapApp {
 
     double location_lat = 0, location_lon = 0;
     bool location_result_ready = false;
+
+    std::vector<Flag> flags;
+    int next_color = 0;
+
+    bool long_press_active = false;
+    ImVec2 long_press_start = {0, 0};
+    std::chrono::steady_clock::time_point long_press_time;
+    bool long_press_fired = false;
+
+    std::string flags_path;
+
+    void load_flags() {
+        std::ifstream f(flags_path);
+        if (!f.is_open()) return;
+        flags.clear();
+        double lat, lon;
+        int ci;
+        while (f >> lat >> lon >> ci) {
+            flags.push_back({lat, lon, ci % FLAG_COLOR_COUNT});
+        }
+        if (!flags.empty()) next_color = (flags.back().color_index + 1) % FLAG_COLOR_COUNT;
+    }
+
+    void save_flags() {
+        std::ofstream f(flags_path);
+        if (!f.is_open()) return;
+        for (auto& fl : flags) {
+            f << fl.lat << " " << fl.lon << " " << fl.color_index << "\n";
+        }
+    }
 
     void start_location_request() {
         if (location_loading) return;
@@ -186,6 +237,20 @@ struct MapApp {
         oy = (int)floor((1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / M_PI) / 2.0 * n);
     }
 
+    void screen_to_latlon(ImVec2 screen, ImVec2 center, int center_tx, int center_ty, double& lat, double& lon) {
+        float dx = screen.x - center.x;
+        float dy = screen.y - center.y;
+        double cl = cos(center_lat * M_PI / 180.0);
+        if (fabs(cl) < 0.01) cl = 0.01;
+        double mpp = 156543.03 * cl / pow(2.0, zoom);
+        lon = center_lon + dx * mpp / 111320.0;
+        lat = center_lat - dy * mpp / 110540.0;
+        if (lat > 85.0) lat = 85.0;
+        if (lat < -85.0) lat = -85.0;
+        while (lon > 180.0) lon -= 360.0;
+        while (lon < -180.0) lon += 360.0;
+    }
+
     void request_tile(int x, int y, int z) {
         TileKey key{x, y, z};
         if (tiles.count(key) || loading.count(key)) return;
@@ -253,11 +318,40 @@ struct MapApp {
         dl->AddText(ImVec2(sx - 30, sy + 14), IM_COL32(255, 255, 255, 255), "You are here");
     }
 
+    void draw_flags(ImDrawList* dl, ImVec2 center, float ts) {
+        int ctx_x, cty_y;
+        tile_coords(center_lat, center_lon, zoom, ctx_x, cty_y);
+        for (auto& fl : flags) {
+            int fx, fy;
+            tile_coords(fl.lat, fl.lon, zoom, fx, fy);
+            float sx = center.x + (fx - ctx_x) * ts;
+            float sy = center.y + (fy - cty_y) * ts;
+            if (sx < -50 || sx > 2000 || sy < -50 || sy > 2000) continue;
+
+            ImVec4 c = FLAG_COLORS[fl.color_index % FLAG_COLOR_COUNT];
+            ImU32 col = IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), 255);
+            ImU32 col_dark = IM_COL32((int)(c.x * 150), (int)(c.y * 150), (int)(c.z * 150), 255);
+
+            dl->AddCircleFilled(ImVec2(sx + 1, sy + 2), 8, IM_COL32(0, 0, 0, 50));
+            dl->AddCircleFilled(ImVec2(sx, sy), 7, col);
+            dl->AddCircle(ImVec2(sx, sy), 7, col_dark, 0, 1.5f);
+            dl->AddCircleFilled(ImVec2(sx, sy), 3, IM_COL32(255, 255, 255, 255));
+        }
+    }
+
     void init() {
         start_time = std::chrono::steady_clock::now();
         logo_tex = create_logo();
         worker = std::thread(&MapApp::worker_thread, this);
         start_location_request();
+
+        const char* home = getenv("HOME");
+        if (home) {
+            flags_path = std::string(home) + "/.osm-map-flags.txt";
+        } else {
+            flags_path = ".osm-map-flags.txt";
+        }
+        load_flags();
     }
 
     void process_results() {
@@ -342,21 +436,51 @@ struct MapApp {
             }
         }
 
+        draw_flags(dl, cs, (float)TILE_SIZE);
         if (has_location) draw_marker(dl, cs, (float)TILE_SIZE);
 
         float bs = 36, mg = 10, sp = 8;
         float bx = ds.x - mg - bs, by = ds.y - mg - bs;
 
-        if (ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered()) {
+        bool over_button = io.MousePos.x > bx - mg && io.MousePos.y > by - bs * 3 - sp * 2 - mg;
+
+        if (ImGui::IsMouseClicked(0) && !over_button) {
             ImVec2 mp = io.MousePos;
             if (mp.x > 0 && mp.x < ds.x && mp.y > 0 && mp.y < ds.y) {
-                if (!(mp.x > bx - mg && mp.y > by - bs * 3 - sp * 2 - mg)) {
-                    dragging = true;
-                    drag_start = mp;
+                dragging = true;
+                drag_start = mp;
+                long_press_active = true;
+                long_press_start = mp;
+                long_press_time = std::chrono::steady_clock::now();
+                long_press_fired = false;
+            }
+        }
+
+        if (long_press_active && ImGui::IsMouseDown(0) && !long_press_fired) {
+            ImVec2 mp = io.MousePos;
+            float dist = sqrtf((mp.x - long_press_start.x) * (mp.x - long_press_start.x) +
+                               (mp.y - long_press_start.y) * (mp.y - long_press_start.y));
+            if (dist > LONG_PRESS_RADIUS) {
+                long_press_active = false;
+            } else {
+                float held = std::chrono::duration<float>(std::chrono::steady_clock::now() - long_press_time).count();
+                if (held >= LONG_PRESS_DURATION) {
+                    long_press_fired = true;
+                    long_press_active = false;
+                    double lat, lon;
+                    screen_to_latlon(long_press_start, cs, ctx, cty, lat, lon);
+                    flags.push_back({lat, lon, next_color});
+                    next_color = (next_color + 1) % FLAG_COLOR_COUNT;
+                    save_flags();
                 }
             }
         }
-        if (ImGui::IsMouseReleased(0)) dragging = false;
+
+        if (ImGui::IsMouseReleased(0)) {
+            dragging = false;
+            long_press_active = false;
+        }
+
         if (dragging && ImGui::IsMouseDragging(0)) {
             ImVec2 mp = io.MousePos;
             float dx = mp.x - drag_start.x, dy = mp.y - drag_start.y;
